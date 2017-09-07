@@ -1,0 +1,12 @@
+service: "listing-images-kafka-processor"
+usecase: "listing-image-management"
+segment: "platform-engineering"
+vertical: "as24"
+owner: "#S24-PlatformEngineering-SRE@scout24.com"
+team: "AS24_FoundationServicess"
+criticality: "bronze"
+confidentiality: "public"
+integrity: "non-critical"
+availability: "non-critical"
+data_protection_relevant: false
+repository_url: "https://github.com/AutoScout24/listing-images-kafka-processor"

@@ -1,0 +1,19 @@
+<configuration>
+
+    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <logger name="org.apache.zookeeper.server.ZooKeeperServer" level="OFF" />
+    <logger name="kafka.server" level="ERROR" />
+    <logger name="org.I0Itec" level="ERROR" />
+    <logger name="org.apache" level="ERROR" />
+    <logger name="com.autoscout24" level="ERROR" />
+
+    <root level="ERROR">
+        <appender-ref ref="STDOUT"/>
+    </root>
+
+</configuration>

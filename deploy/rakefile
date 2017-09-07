@@ -1,0 +1,136 @@
+require 'rubygems'
+require 'bundler/setup'
+require 'autostacker24'
+require 'autocanary24'
+require 'base64'
+require 'dogapi'
+
+Aws.use_bundled_cert!
+
+require_relative 'smoke_test.rb'
+
+SERVICE       = 'listing-images-kafka-processor'
+VERSION       = ENV['VERSION'] || ENV['GO_PIPELINE_LABEL']
+SANDBOX       = ENV['SANDBOX'] || ENV['GO_JOB_NAME'].nil? && `whoami`.strip
+STACK         = SANDBOX ? "#{SANDBOX}-#{SERVICE}" : SERVICE
+GLOBAL        = ENV['GLOBAL'] || 'global'
+TEMPLATE      = 'stack.yaml'
+DATADOG       = true
+ENCRYPTED_OPSGENIE_API_KEY = 'AQECAHg2G5kHM0w3MXrzwTqap0iZUeGHUUg/yKA/JIdBgRZmJQAAAIMwgYAGCSqGSIb3DQEHBqBzMHECAQAwbAYJKoZIhvcNAQcBMB4GCWCGSAFlAwQBLjARBAz1BlhBps93swUANpECARCAP5kbs2Slb/d46O6Q3JwfWuwsXF15AVvmAVH4uEHbibEivyZRtjbXuzdY90pVj4NKvu2bhqG3HkzIbPxHjUx75w=='
+LISTING_IMAGES_API_SECRET_PROD = 'AQECAHg2G5kHM0w3MXrzwTqap0iZUeGHUUg/yKA/JIdBgRZmJQAAAG4wbAYJKoZIhvcNAQcGoF8wXQIBADBYBgkqhkiG9w0BBwEwHgYJYIZIAWUDBAEuMBEEDG3nWYuxLbgpM6RNwAIBEIArXN6qK53Q1eaJVXL1PiezB4bpJLRhO8JOFYbgMrpDnSS+uOos9aNjV2YOzQ=='
+LISTING_IMAGES_API_SECRET_DEV = 'AQECAHg2G5kHM0w3MXrzwTqap0iZUeGHUUg/yKA/JIdBgRZmJQAAAG4wbAYJKoZIhvcNAQcGoF8wXQIBADBYBgkqhkiG9w0BBwEwHgYJYIZIAWUDBAEuMBEEDEbQV6CRead9NeKhrgIBEIAr/iZ0hy2En+GxYJNQxlEBZW/5WM5eWlQexmqWPBXXO7Vn3b47BEiZ7hxVaQ=='
+
+# key: as24-shared
+ENCRYPTED_DATADOG_API_KEY = 'AQECAHg2G5kHM0w3MXrzwTqap0iZUeGHUUg/yKA/JIdBgRZmJQAAAH4wfAYJKoZIhvcNAQcGoG8wbQIBADBoBgkqhkiG9w0BBwEwHgYJYIZIAWUDBAEuMBEEDHYX6gxNt2abfYYB2gIBEIA7q12u/kALwa+o4K12/yaWoPAe2YHsIXoXo+WQtH7Y/ydoBiQZYs/4QXVL6QSX4/AjSXucg1ZGMijBcjw='
+
+
+desc 'create or update stack'
+task :create_or_update do
+  METADATA_TAGS = tags_from_metadata_file("metadata.yaml")
+  TAGS = SANDBOX ? METADATA_TAGS << {key: 'sandbox', value: SANDBOX} : METADATA_TAGS
+  output_global = Stacker.get_stack_output(GLOBAL)
+  account_name = output_global[:AccountName]
+  prod = account_name =~ /as24prod/i
+  fail('VERSION missing') unless VERSION
+
+  if prod && DATADOG
+    TAGS << { key: "datadog", value: "true"}
+  end
+
+  minimumNumberOfServers = prod ? 2 : 1
+  maximumNumberOfServers = prod ? 2 : 1
+  listing_images_api_secret = prod ? kms_decrypt_credentials(LISTING_IMAGES_API_SECRET_PROD) : kms_decrypt_credentials(LISTING_IMAGES_API_SECRET_DEV)
+
+  parameters = {
+      MinimumNumberOfServers: minimumNumberOfServers,
+      MaximumNumberOfServers: maximumNumberOfServers,
+      OpsGenieKey: kms_decrypt_credentials(ENCRYPTED_OPSGENIE_API_KEY),
+      RunbookUrl: "https://github.com/AutoScout24/#{SERVICE}/blob/master/docs/runbooks",
+      AmiId:                ENV['AMI_ID'] || File.read('ami.txt'), # TODO: get newest ami locally
+      AuthRole:             ENV['AUTH_ROLE'] || SERVICE,
+      InstanceType:         prod ? 'm4.large' : 't2.small',
+      EbsOptimized:         prod ? 'true' : 'false',
+      Service:              SERVICE,
+      Version:              VERSION,
+      KafkaTopicCfResourceArn: Stacker.get_stack_output("cf-resource-kafka-topic")[:Lambda],
+      KafkaSecurityGroup:   Stacker.get_stack_outputs('kafka-client')[:KafkaClientSecurityGroup],
+      ZookeeperSecurityGroup: Stacker.get_stack_outputs('zookeeper-client')[:ZooKeeperClientSecurityGroup],
+      DataDog:              (prod && DATADOG).to_s,
+      BastionSecurityGroup: output_global[:BastionSecurityGroup],
+      ListingImagesApiSecret: listing_images_api_secret
+  }
+
+  dog_log(
+        prod && DATADOG,
+        msg_title: "#{SERVICE} deployment",
+        tags: [account_name, SERVICE, 'deployment', 'listing-enrichment'],
+        alert_type: 'info'
+    ) do
+      Stacker.create_or_update_stack(STACK, TEMPLATE, parameters, GLOBAL, TAGS)
+  end
+end
+
+desc 'delete stack'
+task :delete do
+  Stacker.delete_stack(STACK) unless Stacker.find_stack(STACK).nil?
+end
+
+desc 'run integration tests'
+task :test do
+  subdomain = Stacker.get_stack_output(GLOBAL)[:AccountSubDomain]
+  # TODO run_smoke_tests("https://#{STACK}.#{subdomain}.autoscout24.com")
+end
+
+desc 'deploy service'
+task :deploy => [:create_or_update, :test] do
+end
+
+desc 'validate template'
+task :validate do
+  Stacker.validate_template(ELB_TEMPLATE)
+  Stacker.validate_template(TEMPLATE)
+end
+
+desc 'dump template'
+task :dump do
+  puts 'Service Template:'
+  puts JSON.pretty_generate(JSON(Stacker.template_body(TEMPLATE)))
+end
+
+task :default do
+  puts
+  puts 'Use one of the available tasks:'
+  puts "Current stack is #{STACK}\n"
+  system 'rake -T'
+end
+
+def kms_decrypt_credentials(cipher_text)
+  kms = Aws::KMS::Client.new
+  kms.decrypt({ciphertext_blob: Base64.decode64(cipher_text)}).plaintext
+end
+
+def tags_from_metadata_file(path, *additional_tags)
+  allowed_chars = /^[a-zA-Z0-9\+-=\._:\/@]*$/
+
+  data = YAML.load_file(path)
+  ([:service, :usecase, :team, :segment, :repository_url] + additional_tags)
+      .map { |k| [k, data[k.to_s]] }
+      .select { |k,v|
+    if allowed_chars.match(k) && allowed_chars.match(v)
+      true
+    else
+      warn "WARNING: CFN Tag (#{ k }) => (#{ v }) has forbidden characters"
+      false
+    end
+  }
+      .map { |k,v| { key: k, value: v.to_s } }
+end
+
+def dog_log(should_log, params = {})
+  return yield unless should_log
+  datadog_key = kms_decrypt_credentials(ENCRYPTED_DATADOG_API_KEY)
+  datadog = Dogapi::Client.new(datadog_key)
+  datadog.emit_event(Dogapi::Event.new('Started', params))
+  yield
+  datadog.emit_event(Dogapi::Event.new('Finished', params))
+end

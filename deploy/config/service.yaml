@@ -1,0 +1,130 @@
+init_config:
+  is_jmx: true
+  conf:
+      - include:
+          domain: 'listing-images'
+          bean: 'listing-images:name=max-lag'
+          attribute:
+            Value:
+              metric_type: gauge
+              alias: kafka.consumer.records_lag_max
+      - include:
+          domain: 'listing-images'
+          bean: 'listing-images:name=fetch-size-avg'
+          attribute:
+            Value:
+              metric_type: gauge
+              alias: kafka.consumer.fetch_size_avg
+      - include:
+          domain: 'listing-images'
+          bean: 'listing-images:name=fetch-latency-avg'
+          attribute:
+            Value:
+              metric_type: gauge
+              alias: kafka.consumer.fetch_latency_avg
+      - include:
+          domain: 'listing-images'
+          bean: 'listing-images:name=fetch-rate'
+          attribute:
+            Value:
+              metric_type: gauge
+              alias: kafka.consumer.fetch_rate
+      - include:
+          domain: 'listing-images'
+          bean: 'listing-images:name=assigned-partitions'
+          attribute:
+            Value:
+              metric_type: gauge
+              alias: kafka.consumer.assigned_partitions
+      - include:
+          domain: 'listing-images'
+          bean: 'listing-images:name=consumer-request-size-avg'
+          attribute:
+            Value:
+              metric_type: gauge
+              alias: kafka.consumer.request_size_avg
+      - include:
+          domain: 'listing-images'
+          bean: 'listing-images:name=consumer-request-rate'
+          attribute:
+            Value:
+              metric_type: gauge
+              alias: kafka.consumer.request_rate
+      - include:
+          domain: 'listing-images'
+          bean: 'listing-images:name=consumer-response-rate'
+          attribute:
+            Value:
+              metric_type: gauge
+              alias: kafka.consumer.response_rate
+      - include:
+          domain: 'listing-images'
+          bean: 'listing-images:name=consumer-byte-rate'
+          attribute:
+            Value:
+              metric_type: gauge
+              alias: kafka.consumer.bytes_consumed_rate
+      - include:
+          domain: 'listing-images'
+          bean: 'listing-images:name=consumer-connection-count'
+          attribute:
+            Value:
+              metric_type: gauge
+              alias: kafka.consumer.connection_count
+      - include:
+          domain: 'listing-images'
+          bean: 'listing-images:name=producer-byte-rate'
+          attribute:
+            Value:
+              metric_type: gauge
+              alias: kafka.producer.outgoing_byte_rate
+      - include:
+          domain: 'listing-images'
+          bean: 'listing-images:name=producer-request-rate'
+          attribute:
+            Value:
+              metric_type: gauge
+              alias: kafka.producer.request_rate
+      - include:
+          domain: 'listing-images'
+          bean: 'listing-images:name=producer-response-rate'
+          attribute:
+            Value:
+              metric_type: gauge
+              alias: kafka.producer.response_rate
+      - include:
+          domain: 'listing-images'
+          bean: 'listing-images:name=producer-connection-count'
+          attribute:
+            Value:
+              metric_type: gauge
+              alias: kafka.producer.connection_count
+      - include:
+          domain: 'listing-images'
+          bean: 'listing-images:name=producer-error-rate'
+          attribute:
+            Value:
+              metric_type: gauge
+              alias: kafka.producer.record_error_rate
+      - include:
+          domain: 'listing-images'
+          bean: 'listing-images:name=producer-retry-rate'
+          attribute:
+            Value:
+              metric_type: gauge
+              alias: kafka.producer.record_retry_rate
+      - include:
+          domain: 'listing-images'
+          bean: 'listing-images:name=producer-buffer-available-bytes'
+          attribute:
+            Value:
+              metric_type: gauge
+              alias: kafka.producer.buffer_available_bytes
+
+instances:
+  - host: localhost
+    port: 9010
+    name: @{Service}
+    tags:
+      client-id: @{Service}
+    refresh_beans: 60

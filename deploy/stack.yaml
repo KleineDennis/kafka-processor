@@ -1,0 +1,342 @@
+# AutoStacker24 CloudFormation Template (https://github.com/AutoScout24/autostacker24/blob/master/readme.md)
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Listing-images kafka consumer
+Parameters:
+  AccountName:
+    Description: The name of the account, e.g. 'as24prod'
+    Type: String
+  AmiId:
+    Description: Id of existing AMI for service instances
+    Type: AWS::EC2::Image::Id
+  AuthRole:
+    Description: IAM role used to S3 authentication
+    Type: String
+  VpcId:
+    Description: The VPC ID of the global stack
+    Type: AWS::EC2::VPC::Id
+  AvailabilityZones:
+    Description: The list of AvailabilityZones for your Virtual Private Cloud (VPC)
+    Type: List<AWS::EC2::AvailabilityZone::Name>
+  DataDog:
+    Description: Whether to enable DataDog in production
+    Type: String
+  EbsOptimized:
+    Description: Whether to use EBS-Optimized instances
+    Type: String
+  InstanceType:
+    Description: Instance type of service application servers
+    Type: String
+  MaximumNumberOfServers:
+    Description: Maximum number of servers to have in the autoscaling group
+    Type: Number
+  MinimumNumberOfServers:
+    Description: Minimum number of servers to have in the autoscaling group
+    Type: Number
+  RunbookUrl:
+    Description: Location of runbooks, which holds prodecures for handling alerts
+    Type: String
+  Service:
+    Description: Name of the service.
+    Type: String
+  BastionSecurityGroup:
+    Description: Security group of the bastion host
+    Type: AWS::EC2::SecurityGroup::Id
+  PrivateServiceSubnets:
+    Description: Subnets where service instances should be launched.
+    Type: List<AWS::EC2::Subnet::Id>
+  Version:
+    Description: Version of the service to launch.
+    Type: String
+  OpsGenieKey:
+    Description: API key for OpsGenie integration
+    Type: String
+    NoEcho: 'true'
+  KafkaTopicCfResourceArn:
+    Description: Arn of the Kafka Topic custom resource Lambda
+    Type: String
+  ListingImagesApiSecret:
+    Description: The client secret for accessing the listing images API
+    Type: String
+    NoEcho: 'true'
+  KafkaSecurityGroup:
+    Description: "Security group for the kafka client"
+    Type: String
+  ZookeeperSecurityGroup:
+    Description: "Security group for the zookeeper client"
+    Type: String
+
+Conditions:
+  IsDev: !Equals [!Ref AccountName, "as24dev"]
+  UseDataDog: !Equals [!Ref DataDog, true]
+
+Resources:
+  OpsGenieTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription:
+      - Endpoint: !Sub https://api.opsgenie.com/v1/json/cloudwatch?apiKey=${OpsGenieKey}
+        Protocol: https
+      TopicName: !Sub "${AWS::StackName}-opsgenie"
+  ServiceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable access to the service host
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: '22'
+        ToPort: '22'
+        SourceSecurityGroupId: !Ref BastionSecurityGroup
+      Tags:
+      - Key: Name
+        Value: !Sub "${AWS::StackName}"
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AvailabilityZones: !Ref AvailabilityZones
+      VPCZoneIdentifier: !Ref PrivateServiceSubnets
+      LaunchConfigurationName: !Ref LaunchConfig
+      MinSize: !Ref MinimumNumberOfServers
+      MaxSize: !Ref MaximumNumberOfServers
+      HealthCheckGracePeriod: '600'
+      HealthCheckType: EC2
+      MetricsCollection:
+      - Granularity: 1Minute
+        Metrics:
+        - GroupInServiceInstances
+      NotificationConfigurations:
+      - TopicARN: !Ref OpsGenieTopic
+        NotificationTypes:
+        - autoscaling:EC2_INSTANCE_LAUNCH_ERROR
+        - autoscaling:EC2_INSTANCE_TERMINATE_ERROR
+      Tags:
+      - Key: Name
+        Value: !Ref Service
+        PropagateAtLaunch: 'true'
+    CreationPolicy:
+      ResourceSignal:
+        Count: !Ref MinimumNumberOfServers
+        Timeout: PT10M
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MaxBatchSize: 1
+        PauseTime: PT10M
+        SuspendProcesses:
+        - AlarmNotification
+        - ScheduledActions
+        WaitOnResourceSignals: 'true'
+  OfficeHoursScaleUp:
+    Type: AWS::AutoScaling::ScheduledAction
+    Condition: IsDev
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      MinSize: !Ref MinimumNumberOfServers
+      MaxSize: !Ref MaximumNumberOfServers
+      Recurrence: 0 6 * * 1-5
+  OfficeHoursScaleDown:
+    Type: AWS::AutoScaling::ScheduledAction
+    Condition: IsDev
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      MinSize: '0'
+      MaxSize: '0'
+      Recurrence: 0 20 * * *
+  LaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Metadata:
+      AWS::CloudFormation::Authentication:
+        S3AccessCreds:
+          type: s3
+          buckets:
+          - !Sub as24-artifacts-${AWS::Region}
+          roleName: !Ref AuthRole
+      AWS::CloudFormation::Init:
+        configSets:
+          service_configuration:
+          - user_config
+          - fluentd_config
+          - service_setup
+          datadog_configuration:
+          - datadog_setup
+        user_config:
+          commands:
+            add_app_user:
+              command: useradd -U -d /opt/service service -s /bin/bash
+            custom_bash_prompt:
+              command: !Sub |
+                if [ "${AccountName}" = "as24prod" ]; then
+                  echo 'export PS1="${Service}|\[\033[38;5;1m\]${AccountName}\[$(tput sgr0)\]|\u@\h:\w\$ "' >> /etc/bashrc
+                else
+                  echo 'export PS1="${Service}|${AccountName}|\u@\h:\w\$ "' >> /etc/bashrc
+                fi
+        fluentd_config:
+          files:
+            /opt/fluentd/conf.d/service.conf:
+              content: '@file://./config/fluentd-service.conf'
+          commands:
+            start_fluentd:
+              command: !Sub |
+                if /sbin/initctl status fluentd | grep -q 'stop/waiting'; then
+                    /sbin/initctl start fluentd STACKNAME="${AWS::StackName}"
+                else
+                    /sbin/initctl reload fluentd STACKNAME="${AWS::StackName}"
+                fi
+        logrotate_config:
+          files:
+            /etc/logrotate.d/application:
+              content: |
+                /opt/service/application.log {
+                  compress
+                  copytruncate
+                  rotate 5
+                  size 100M
+                }
+          commands:
+            a_delete_logrotate:
+              command: rm /etc/cron.daily/logrotate
+            b_configure_logrotate:
+              command: echo "*/1 * * * * /usr/sbin/logrotate /etc/logrotate.conf" | crontab
+        service_setup:
+          sources:
+            "/opt/service": !Sub "https://s3-${AWS::Region}.amazonaws.com/as24-artifacts-${AWS::Region}/${Service}/${Service}-${Version}.tgz"
+          files:
+            "/opt/service/start.sh":
+              content: "@{file://./start.sh}"
+              mode: '000555'
+              owner: root
+              group: root
+          commands:
+            a_kstreams:
+              command: mkdir -p /var/kafka-streams
+            aba_kstreams:
+              command: chown -R service.service /var/kafka-streams
+            ac_chmod:
+              command: chown -R service.service /opt/service
+            ad_chmod:
+              command: chmod a+x /opt/service
+            b_start:
+              command: nohup ./start.sh >> /opt/service/application.log 2>&1 &
+              cwd: "/opt/service"
+            c_smoketest:
+              command: sleep 5 && ps -fp $(pgrep -d, -x java) | grep @{Service}-@{Version}.jar
+        datadog_setup:
+          files:
+            "/etc/dd-agent/conf.d/service.yaml":
+              content: '@file://./config/service.yaml'
+              mode: '000644'
+              owner: dd-agent
+              group: root
+            "/etc/dd-agent/conf.d/disk.yaml":
+              content: '@file://./config/disk.yaml'
+              mode: '000644'
+              owner: dd-agent
+              group: root
+          commands:
+            start_datadog:
+              command: service datadog-agent start
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      SecurityGroups:
+        - !Ref ServiceSecurityGroup
+        - !Ref ZookeeperSecurityGroup
+        - !Ref KafkaSecurityGroup
+      IamInstanceProfile: !Ref AuthRole
+      EbsOptimized: !Ref EbsOptimized
+      UserData:
+        "Fn::Base64": !Sub |
+          #!/bin/bash
+
+          # This is needed for cfn-init to reinitialize the instances with the new version on updates
+          VERSION="${Version}"
+
+          if [ "${DataDog}" = "true" ]; then
+              CONFIG_SETS="service_configuration,datadog_configuration"
+          else
+              CONFIG_SETS="service_configuration"
+          fi
+
+          /opt/aws/bin/cfn-init -v \
+              --stack ${AWS::StackName} \
+              --resource LaunchConfig \
+              --configsets $CONFIG_SETS \
+              --region ${AWS::Region}
+
+          /opt/aws/bin/cfn-signal -e $? \
+              --stack ${AWS::StackName} \
+              --region ${AWS::Region} \
+              --resource AutoScalingGroup
+
+  WebServerScaleUpPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      Cooldown: '600'
+      ScalingAdjustment: '1'
+
+  RawListingsExistKafkaTopic:
+    Type: AWS::CloudFormation::CustomResource
+    Version: "1.0"
+    Properties:
+      ServiceToken: "@KafkaTopicCfResourceArn"
+      Name: "listing-images-raw-listings-exists"
+      Partitions: 30
+      Replication: 3
+      CleanupPolicy: compact
+      Config:
+        min.cleanable.dirty.ratio: "0.01"
+
+  ListingImagesExistKafkaTopic:
+      Type: AWS::CloudFormation::CustomResource
+      Version: "1.0"
+      Properties:
+        ServiceToken: "@KafkaTopicCfResourceArn"
+        Name: "listing-images-exists"
+        Partitions: 30
+        Replication: 3
+        CleanupPolicy: compact
+        Config:
+          min.cleanable.dirty.ratio: "0.01"
+
+  WebServerScaleDownPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      Cooldown: '900'
+      ScalingAdjustment: "-1"
+
+  CPUAlarmHigh:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Scale-up if CPU > 50% for 2 minutes
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: '120'
+      EvaluationPeriods: '1'
+      Threshold: '50'
+      AlarmActions:
+      - !Ref WebServerScaleUpPolicy
+      Dimensions:
+      - Name: AutoScalingGroupName
+        Value: !Ref AutoScalingGroup
+      ComparisonOperator: GreaterThanThreshold
+
+  CPUAlarmLow:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Scale-down if CPU < 20% for 10 minutes
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: '600'
+      EvaluationPeriods: '1'
+      Threshold: '20'
+      AlarmActions:
+      - !Ref WebServerScaleDownPolicy
+      Dimensions:
+      - Name: AutoScalingGroupName
+        Value: !Ref AutoScalingGroup
+      ComparisonOperator: LessThanThreshold
